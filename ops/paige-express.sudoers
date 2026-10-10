@@ -1,0 +1,2 @@
+paige-express ALL=(root) NOPASSWD: /usr/bin/systemctl restart paige-express.service
+paige-express ALL=(root) NOPASSWD: /usr/bin/journalctl -u paige-express.service -n 100 -o json --no-pager

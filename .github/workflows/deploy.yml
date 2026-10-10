@@ -1,0 +1,121 @@
+name: CI and deploy
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  check:
+    name: Check and build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "24.18.0"
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Check types
+        run: npm run typecheck
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Check formatting
+        run: npm run format:check
+
+      - name: Check deployment script syntax
+        run: bash -n scripts/deploy.sh
+
+      - name: Build
+        run: npm run build
+
+      - name: Package release
+        if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+        run: |
+          mkdir deployment
+          tar -czf deployment/release.tar.gz dist assets package.json package-lock.json
+          cp scripts/deploy.sh deployment/deploy.sh
+
+      - name: Upload release
+        if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: paige-express-release
+          path: deployment/
+          if-no-files-found: error
+          retention-days: 7
+
+  deploy:
+    name: Deploy to VPS
+    needs: check
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Download release
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
+        with:
+          name: paige-express-release
+          path: ${{ runner.temp }}/deployment
+
+      - name: Upload and deploy release
+        shell: bash
+        env:
+          SSH_HOST: ${{ secrets.SSH_HOST }}
+          SSH_USER: ${{ secrets.SSH_USER }}
+          SSH_PORT: ${{ secrets.SSH_PORT }}
+          SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+          SSH_KNOWN_HOSTS: ${{ secrets.SSH_KNOWN_HOSTS }}
+        run: |
+          set -euo pipefail
+          [[ "$SSH_HOST" =~ ^[a-zA-Z0-9][a-zA-Z0-9.-]*$ ]]
+          [[ "$SSH_USER" =~ ^[a-z_][a-z0-9_-]*$ ]]
+          [[ "$SSH_PORT" =~ ^[0-9]{1,5}$ ]]
+          (( 10#$SSH_PORT >= 1 && 10#$SSH_PORT <= 65535 ))
+          [[ -n "$SSH_PRIVATE_KEY" && -n "$SSH_KNOWN_HOSTS" ]]
+
+          ssh_dir="$(mktemp -d "$RUNNER_TEMP/paige-ssh.XXXXXX")"
+          trap 'rm -f -- "$ssh_dir/id_ed25519" "$ssh_dir/known_hosts"; rmdir -- "$ssh_dir"' EXIT
+          printf '%s\n' "$SSH_PRIVATE_KEY" | tr -d '\r' > "$ssh_dir/id_ed25519"
+          printf '%s\n' "$SSH_KNOWN_HOSTS" | tr -d '\r' > "$ssh_dir/known_hosts"
+          chmod 600 "$ssh_dir/id_ed25519" "$ssh_dir/known_hosts"
+          unset SSH_PRIVATE_KEY SSH_KNOWN_HOSTS
+
+          ssh_options=(
+            -i "$ssh_dir/id_ed25519"
+            -o "UserKnownHostsFile=$ssh_dir/known_hosts"
+            -o StrictHostKeyChecking=yes
+            -o IdentitiesOnly=yes
+            -o BatchMode=yes
+            -o ConnectTimeout=15
+            -o ServerAliveInterval=15
+            -o ServerAliveCountMax=3
+          )
+          release_id="$GITHUB_SHA-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          remote="$SSH_USER@$SSH_HOST"
+          remote_archive="/opt/paige-express/releases/$release_id.tar.gz"
+          remote_script="/opt/paige-express/releases/$release_id.deploy.sh"
+
+          scp -P "$SSH_PORT" "${ssh_options[@]}" "$RUNNER_TEMP/deployment/release.tar.gz" "$remote:$remote_archive"
+          scp -P "$SSH_PORT" "${ssh_options[@]}" "$RUNNER_TEMP/deployment/deploy.sh" "$remote:$remote_script"
+          ssh -p "$SSH_PORT" "${ssh_options[@]}" "$remote" "bash '$remote_script' '$release_id' '$remote_archive'"
