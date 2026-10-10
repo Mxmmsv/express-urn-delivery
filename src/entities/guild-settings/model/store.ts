@@ -106,7 +106,14 @@ export function createGuildSettingsStore() {
     return write;
   }
 
-  return { load, get, save };
+  function list(): { guildId: string; settings: GuildSettings }[] {
+    return [...settings.keys()].map((guildId) => ({
+      guildId,
+      settings: get(guildId),
+    }));
+  }
+
+  return { load, get, save, list };
 }
 
 export type GuildSettingsStore = ReturnType<typeof createGuildSettingsStore>;
