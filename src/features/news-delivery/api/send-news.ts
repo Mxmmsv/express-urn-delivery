@@ -55,6 +55,12 @@ export async function sendNews(
       reason:
         "The news channel requires View Channel, Send Messages, Embed Links, and Read Message History.",
     };
+  if (!entry.news.imageUrl && !permissions.has(PermissionFlagsBits.AttachFiles))
+    return {
+      status: "deferred",
+      reason:
+        "The news channel requires Attach Files to send the fallback image.",
+    };
 
   const roleIds = settings.roleMentionsEnabled
     ? settings.roleIds.filter((id) => {

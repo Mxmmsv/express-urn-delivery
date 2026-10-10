@@ -27,10 +27,11 @@ export async function validateSettings(
       PermissionFlagsBits.ViewChannel,
       PermissionFlagsBits.SendMessages,
       PermissionFlagsBits.EmbedLinks,
+      PermissionFlagsBits.AttachFiles,
       PermissionFlagsBits.ReadMessageHistory,
     ])
   ) {
-    return "I need View Channel, Send Messages, Embed Links, and Read Message History permissions in the selected channel.";
+    return "I need View Channel, Send Messages, Embed Links, Attach Files, and Read Message History permissions in the selected channel.";
   }
 
   for (const roleId of settings.roleMentionsEnabled ? settings.roleIds : []) {

@@ -1,6 +1,7 @@
-import { EmbedBuilder, escapeMarkdown } from "discord.js";
+import { AttachmentBuilder, EmbedBuilder, escapeMarkdown } from "discord.js";
 
 import type { NewsItem } from "../../../entities/news/index.js";
+import { getProjectPath } from "../../../shared/lib/project-path.js";
 
 function truncate(text: string, length: number): string {
   if (text.length <= length) return text;
@@ -26,12 +27,22 @@ export function buildNewsMessage(
   if (firstParagraph)
     embed.setDescription(truncate(escapeMarkdown(firstParagraph), 1000));
   if (news.publishedAt) embed.setTimestamp(new Date(news.publishedAt));
-  if (news.imageUrl) embed.setImage(news.imageUrl);
+  embed.setImage(news.imageUrl || "attachment://news_fallback.png");
   return {
     ...(roleIds.length
       ? { content: roleIds.map((id) => `<@&${id}>`).join(" ") }
       : {}),
     embeds: [embed],
+    ...(!news.imageUrl
+      ? {
+          files: [
+            new AttachmentBuilder(
+              getProjectPath("assets", "news_fallback.png"),
+              { name: "news_fallback.png" },
+            ),
+          ],
+        }
+      : {}),
     allowedMentions: {
       parse: [] as const,
       roles: roleIds,
