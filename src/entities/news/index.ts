@@ -6,3 +6,4 @@ export type {
   NewsItem,
   PendingNews,
 } from "./model/types.js";
+export { undeadlockNewsIdPrefix } from "./model/types.js";

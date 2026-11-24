@@ -1,9 +1,13 @@
 import type { Client } from "discord.js";
 
 import type { GuildSettingsStore } from "../../../entities/guild-settings/index.js";
-import type { NewsItem, NewsStore } from "../../../entities/news/index.js";
+import type { NewsStore } from "../../../entities/news/index.js";
 import { sendNews } from "../api/send-news.js";
 import { fetchSteamNews } from "../api/steam-rss.js";
+import {
+  fetchLatestUndeadlockPatch,
+  fetchUndeadlockPatchesAfter,
+} from "../api/undeadlock.js";
 
 interface DeliveryOptions {
   client: Client;
@@ -19,49 +23,73 @@ export function createNewsDelivery({
   pollIntervalMs,
 }: DeliveryOptions) {
   let running = false;
-  let timer: NodeJS.Timeout | undefined;
-  let activeCycle: Promise<void> | undefined;
-  let request: AbortController | undefined;
-  let steamFailures = 0;
-  let nextDelayMs = pollIntervalMs;
+  let stopPolls: (() => Promise<void>)[] = [];
+  let delivery = Promise.resolve();
 
   function isRunning(): boolean {
     return running && client.isReady();
   }
 
-  async function runCycle(): Promise<void> {
-    if (!isRunning()) return;
-    let feed: NewsItem[] | undefined;
-    request = new AbortController();
-    try {
-      feed = await fetchSteamNews(request.signal);
-      steamFailures = 0;
-      nextDelayMs = pollIntervalMs;
-    } catch (error) {
-      if (!running) return;
-      steamFailures += 1;
-      nextDelayMs = Math.max(
-        pollIntervalMs,
-        Math.min(
-          15 * 60_000,
-          pollIntervalMs * 2 ** Math.min(steamFailures, 10),
-        ),
-      );
-      console.error(
-        `Failed to fetch Steam news. Next RSS check in ${nextDelayMs / 1000} seconds:`,
-        error,
-      );
-    } finally {
-      request = undefined;
-    }
+  function configuredGuildIds(): string[] {
+    return settingsStore
+      .list()
+      .filter(
+        ({ guildId, settings }) =>
+          settings.channelId && client.guilds.cache.has(guildId),
+      )
+      .map(({ guildId }) => guildId);
+  }
 
-    for (const { guildId, settings } of settingsStore.list()) {
+  async function pollSteam(signal: AbortSignal): Promise<void> {
+    const feed = await fetchSteamNews(signal);
+    for (const guildId of configuredGuildIds()) {
       if (!isRunning()) return;
-      if (!settings.channelId) continue;
+      await newsStore.synchronize(guildId, feed);
+    }
+  }
+
+  async function pollUndeadlock(signal: AbortSignal): Promise<void> {
+    const guilds = configuredGuildIds().map((id) => ({
+      id,
+      cursor: newsStore.getUndeadlockCursor(id),
+    }));
+    if (!guilds.length) return;
+    const cursors = guilds.flatMap(({ cursor }) =>
+      cursor === undefined ? [] : [cursor],
+    );
+    if (cursors.length) {
+      const patches = await fetchUndeadlockPatchesAfter(
+        Math.min(...cursors),
+        signal,
+      );
+      const latest = patches.at(-1);
+      if (latest) {
+        for (const { id, cursor } of guilds) {
+          if (!isRunning()) return;
+          if (cursor === undefined || cursor >= latest.id) continue;
+          const news = patches.flatMap((patch) =>
+            patch.id > cursor && patch.news ? [patch.news] : [],
+          );
+          await newsStore.synchronizeUndeadlock(id, latest.id, news);
+        }
+      }
+    }
+    const newGuilds = guilds.filter(({ cursor }) => cursor === undefined);
+    if (!newGuilds.length || !isRunning()) return;
+    const initial = await fetchLatestUndeadlockPatch(signal);
+    if (!initial) return;
+    for (const { id } of newGuilds) {
+      if (!isRunning()) return;
+      await newsStore.synchronizeUndeadlock(id, initial.cursor, initial.news);
+    }
+  }
+
+  async function deliverPending(): Promise<void> {
+    for (const guildId of configuredGuildIds()) {
+      if (!isRunning()) return;
       const guild = client.guilds.cache.get(guildId);
       if (!guild) continue;
       try {
-        if (feed) await newsStore.synchronize(guildId, feed);
         for (const entry of newsStore.getPending(guildId)) {
           if (!isRunning()) return;
           const result = await sendNews(
@@ -80,7 +108,7 @@ export function createNewsDelivery({
           }
           await newsStore.markDelivered(guildId, result.receipt);
           console.log(
-            `Delivered Steam news ${entry.news.id} to guild ${guildId}, channel ${result.receipt.channelId}.`,
+            `Delivered news ${entry.news.id} to guild ${guildId}, channel ${result.receipt.channelId}.`,
           );
         }
       } catch (error) {
@@ -92,35 +120,72 @@ export function createNewsDelivery({
     }
   }
 
-  function checkNow(): void {
-    if (!running) return;
-    activeCycle = runCycle()
-      .catch((error: unknown) => {
+  function startPolling(
+    source: string,
+    poll: (signal: AbortSignal) => Promise<void>,
+  ): () => Promise<void> {
+    const request = new AbortController();
+    let timer: NodeJS.Timeout | undefined;
+    let activeCycle: Promise<void>;
+    let failures = 0;
+
+    async function runCycle(): Promise<void> {
+      let delay = pollIntervalMs;
+      if (isRunning()) {
+        try {
+          await poll(request.signal);
+          failures = 0;
+        } catch (error) {
+          if (!running) return;
+          failures += 1;
+          delay = Math.max(
+            pollIntervalMs,
+            Math.min(15 * 60_000, pollIntervalMs * 2 ** Math.min(failures, 10)),
+          );
+          console.error(
+            `Failed to check ${source} news. Retrying in ${delay / 1000} seconds:`,
+            error,
+          );
+        }
+      }
+      if (!running) return;
+      delivery = delivery.then(deliverPending).catch((error: unknown) => {
         console.error("News delivery cycle failed:", error);
-      })
-      .finally(() => {
-        activeCycle = undefined;
-        if (!running) return;
-        timer = setTimeout(checkNow, nextDelayMs);
-        timer.unref();
       });
+      await delivery;
+      if (!running) return;
+      timer = setTimeout(checkNow, delay);
+      timer.unref();
+    }
+
+    function checkNow(): void {
+      if (!request.signal.aborted) activeCycle = runCycle();
+    }
+
+    activeCycle = runCycle();
+    return async () => {
+      clearTimeout(timer);
+      request.abort();
+      await activeCycle;
+    };
   }
 
   function start(): void {
     if (running) return;
     running = true;
     console.log(
-      `Steam news delivery started. Poll interval: ${pollIntervalMs / 1000} seconds.`,
+      `Steam and unDeadlock news delivery started. Poll interval: ${pollIntervalMs / 1000} seconds.`,
     );
-    checkNow();
+    stopPolls = [
+      startPolling("Steam", pollSteam),
+      startPolling("unDeadlock", pollUndeadlock),
+    ];
   }
 
   async function stop(): Promise<void> {
     running = false;
-    clearTimeout(timer);
-    timer = undefined;
-    request?.abort();
-    await activeCycle;
+    await Promise.all(stopPolls.map((stopPoll) => stopPoll()));
+    await delivery;
     await newsStore.waitForWrites();
   }
 

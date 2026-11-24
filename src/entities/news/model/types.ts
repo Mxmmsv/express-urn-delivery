@@ -1,3 +1,5 @@
+export const undeadlockNewsIdPrefix = "undeadlock:";
+
 export interface NewsItem {
   id: string;
   title: string;
@@ -25,6 +27,7 @@ export interface DeliveryReceipt {
 }
 
 export interface GuildNewsState {
+  undeadlockCursor?: number;
   knownIds: string[];
   pending: PendingNews[];
   delivered: DeliveryReceipt[];

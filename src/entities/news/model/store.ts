@@ -5,10 +5,12 @@ import { getProjectPath } from "../../../shared/lib/project-path.js";
 import type {
   DeliveryAttempt,
   DeliveryReceipt,
+  GuildNewsState,
   NewsItem,
   NewsState,
   PendingNews,
 } from "./types.js";
+import { undeadlockNewsIdPrefix } from "./types.js";
 import { isNewsState } from "./validate-state.js";
 
 export function createNewsStore() {
@@ -56,6 +58,27 @@ export function createNewsStore() {
     return write;
   }
 
+  function enqueueNews(
+    guild: GuildNewsState,
+    news: readonly NewsItem[],
+    latestOnly = false,
+  ): boolean {
+    const known = new Set(guild.knownIds);
+    const unseen = news.filter((item) => !known.has(item.id));
+    if (!unseen.length) return false;
+    guild.knownIds.push(...unseen.map((item) => item.id));
+    const queued = latestOnly ? unseen.slice(-1) : unseen;
+    guild.pending.push(
+      ...queued.map((item) => ({ news: item, attempt: null })),
+    );
+    guild.pending.sort((a, b) =>
+      a.news.publishedAt && b.news.publishedAt
+        ? Date.parse(a.news.publishedAt) - Date.parse(b.news.publishedAt)
+        : 0,
+    );
+    return true;
+  }
+
   function synchronize(
     guildId: string,
     news: readonly NewsItem[],
@@ -63,29 +86,37 @@ export function createNewsStore() {
     const snapshot = structuredClone(news);
     return change((next) => {
       if (snapshot.length === 0) return false;
-      const guild = next.guilds[guildId];
-      if (!guild) {
-        const latest = snapshot.at(-1);
-        if (!latest) return false;
-        next.guilds[guildId] = {
-          knownIds: snapshot.map((item) => item.id),
-          pending: [{ news: latest, attempt: null }],
-          delivered: [],
-        };
-        return true;
-      }
-      const known = new Set(guild.knownIds);
-      const unseen = snapshot.filter((item) => !known.has(item.id));
-      if (!unseen.length) return false;
-      guild.knownIds.push(...unseen.map((item) => item.id));
-      guild.pending.push(
-        ...unseen.map((item) => ({ news: item, attempt: null })),
+      const guild = (next.guilds[guildId] ??= {
+        knownIds: [],
+        pending: [],
+        delivered: [],
+      });
+      const firstSteamSync = guild.knownIds.every((id) =>
+        id.startsWith(undeadlockNewsIdPrefix),
       );
-      guild.pending.sort((a, b) =>
-        a.news.publishedAt && b.news.publishedAt
-          ? Date.parse(a.news.publishedAt) - Date.parse(b.news.publishedAt)
-          : 0,
-      );
+      return enqueueNews(guild, snapshot, firstSteamSync);
+    });
+  }
+
+  function getUndeadlockCursor(guildId: string): number | undefined {
+    return state.guilds[guildId]?.undeadlockCursor;
+  }
+
+  function synchronizeUndeadlock(
+    guildId: string,
+    cursor: number,
+    news: readonly NewsItem[],
+  ): Promise<void> {
+    const snapshot = structuredClone(news);
+    return change((next) => {
+      const guild = (next.guilds[guildId] ??= {
+        knownIds: [],
+        pending: [],
+        delivered: [],
+      });
+      if (cursor <= (guild.undeadlockCursor ?? 0)) return false;
+      enqueueNews(guild, snapshot);
+      guild.undeadlockCursor = cursor;
       return true;
     });
   }
@@ -142,6 +173,8 @@ export function createNewsStore() {
   return {
     load,
     synchronize,
+    getUndeadlockCursor,
+    synchronizeUndeadlock,
     getPending,
     beginAttempt,
     markDelivered,

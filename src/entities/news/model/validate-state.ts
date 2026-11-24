@@ -45,6 +45,10 @@ export function isNewsState(value: unknown): value is NewsState {
     if (
       !isSnowflake(guildId) ||
       !isRecord(guild) ||
+      (guild.undeadlockCursor !== undefined &&
+        (typeof guild.undeadlockCursor !== "number" ||
+          !Number.isSafeInteger(guild.undeadlockCursor) ||
+          guild.undeadlockCursor <= 0)) ||
       !Array.isArray(guild.knownIds) ||
       !guild.knownIds.every(isId) ||
       !Array.isArray(guild.pending) ||

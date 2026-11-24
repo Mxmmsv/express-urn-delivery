@@ -1,6 +1,9 @@
 import { AttachmentBuilder, EmbedBuilder, escapeMarkdown } from "discord.js";
 
-import type { NewsItem } from "../../../entities/news/index.js";
+import {
+  type NewsItem,
+  undeadlockNewsIdPrefix,
+} from "../../../entities/news/index.js";
 import { getProjectPath } from "../../../shared/lib/project-path.js";
 
 function truncate(text: string, length: number): string {
@@ -21,7 +24,11 @@ export function buildNewsMessage(
     .setTitle(truncate(news.title, 256))
     .setURL(news.url)
     .setColor(0xe89b44)
-    .setFooter({ text: "Steam • Deadlock" });
+    .setFooter({
+      text: news.id.startsWith(undeadlockNewsIdPrefix)
+        ? "unDeadlock • Неофициальные изменения"
+        : "Steam • Deadlock",
+    });
   // HTML line breaks are preserved by the RSS converter with word wrapping off.
   const firstParagraph = news.text.trim().split(/\r?\n/, 1)[0] ?? "";
   if (firstParagraph)
