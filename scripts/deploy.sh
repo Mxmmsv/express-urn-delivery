@@ -56,7 +56,10 @@ is_ready() {
         .filter(entry => entry._SYSTEMD_INVOCATION_ID === invocation)
         .map(entry => typeof entry.MESSAGE === "string" ? entry.MESSAGE : "");
       const connected = messages.some(message => message.startsWith("Connected to Discord as "));
-      const deliveryStarted = messages.some(message => message.startsWith("Steam news delivery started."));
+      const deliveryStarted = messages.some(message =>
+        message.startsWith("Steam and unDeadlock news delivery started.") ||
+        message.startsWith("Steam news delivery started.")
+      );
       process.exit(connected && deliveryStarted ? 0 : 1);
     ' "$invocation"
 }
